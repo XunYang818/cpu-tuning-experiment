@@ -46,7 +46,7 @@ foreach ($seed in @(42,123,2026)) {
 
 汇总会从保存的预测重新计算指标，核对真实节点标签、划分、选型及逐轮曲线；同时检查每次配置和数据哈希相同。输出逐种子指标、均值及样本标准差、配对差值、逐类别结果、验证选择和学习曲线。三次重复不支持夸大统计显著性。
 
-绘图脚本 `plot_mlp.py --summary <汇总目录> --out <新的图目录>` 另需 Matplotlib，输出 PNG/SVG。它不参与训练、调参或指标计算。
+绘图脚本 `plot_mlp.py --summary <汇总目录> --out <新的图目录>` 使用 Matplotlib，输出 PNG/SVG。它不参与训练、调参或指标计算。本机实验环境已获准补装 Matplotlib；绘图前可设置 `MPLCONFIGDIR` 指向 `codex_proc` 下的缓存目录。
 
 ## 耗时与溯源
 
@@ -60,7 +60,7 @@ foreach ($seed in @(42,123,2026)) {
 
 - 三次原始运行：`D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-{42,123,2026}`。
 - 最终核验与汇总：`D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-summary-final`。
-- PNG/SVG 图表：`D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-figures-final`。
+- 同一 Miniforge 环境生成的 PNG/SVG 图表：`D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-figures-conda`。
 - `fact_notes.md` 保存本轮事实及限制；`validation_selected_mean_sd.csv` 保存实际按验证集选择方案的最终表现。
 - 实际训练版本快照存于 `codex_proc\cpu-tuning\v3-executed-mlp-source.py`，与协议内源文件哈希一致。随后仅加固异常索引的拒绝检查；所有已有划分都已重新通过该检查。特征、训练、采样和指标算法未变化。
 
