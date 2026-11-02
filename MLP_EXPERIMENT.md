@@ -38,15 +38,15 @@ $conda = 'D:\miniforge3\Scripts\conda.exe'
 $env:PYTHONDONTWRITEBYTECODE='1'
 $env:OMP_NUM_THREADS='1'; $env:MKL_NUM_THREADS='1'; $env:OPENBLAS_NUM_THREADS='1'
 foreach ($seed in @(42,123,2026)) {
-  & $conda run --no-capture-output -n cpu-tuning-experiment python -B mlp_experiment.py --run "D:\作业\数据挖掘\codex_proc\cpu-tuning\v2-full-50000-$seed" --cache 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-graph-features' --out "D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-$seed"
+  & $conda run --no-capture-output -n cpu-tuning-experiment python -B run.py mlp --run "D:\作业\数据挖掘\codex_proc\cpu-tuning\v2-full-50000-$seed" --cache 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-graph-features' --out "D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-$seed"
   if ($LASTEXITCODE -ne 0) { throw "实验失败：$seed" }
 }
-& $conda run --no-capture-output -n cpu-tuning-experiment python -B summarize_mlp.py --runs 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-42' 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-123' 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-2026' --out 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-summary'
+& $conda run --no-capture-output -n cpu-tuning-experiment python -B run.py summarize-mlp --runs 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-42' 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-123' 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-2026' --out 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-summary'
 ```
 
 汇总会从保存的预测重新计算指标，核对真实节点标签、划分、选型及逐轮曲线；同时检查每次配置和数据哈希相同。输出逐种子指标、均值及样本标准差、配对差值、逐类别结果、验证选择和学习曲线。三次重复不支持夸大统计显著性。
 
-绘图脚本 `plot_mlp.py --summary <汇总目录> --out <新的图目录>` 使用 Matplotlib，输出 PNG/SVG。它不参与训练、调参或指标计算。本机实验环境已获准补装 Matplotlib；绘图前可设置 `MPLCONFIGDIR` 指向 `codex_proc` 下的缓存目录。
+绘图脚本 `python -B run.py plot-mlp --summary <汇总目录> --out <新的图目录>` 使用 Matplotlib，输出 PNG/SVG。它不参与训练、调参或指标计算。本机实验环境已获准补装 Matplotlib；绘图前可设置 `MPLCONFIGDIR` 指向 `codex_proc` 下的缓存目录。
 
 ## 耗时与溯源
 
@@ -54,7 +54,7 @@ foreach ($seed in @(42,123,2026)) {
 
 图特征计算、缓存保存、缓存访问、采样与标准化、验证搜索、最终训练和最终预测分别计时。最终训练耗时不包含验证搜索和图特征构造；应连同这些额外成本报告。已有回归和社区结果在独立文件保留，不能把分类特征的提升直接套用到回归或社区任务。
 
-纯内存协议测试：`python -B -m unittest test_mlp_protocol -v`，覆盖无向边去重、自环、孤立节点、两阶聚合、采样不越出训练 ID 和标准化不拟合留出集等关键约束。
+协议与入口测试：`python -B -m unittest discover -s tests -v`，覆盖无向边去重、自环、孤立节点、两阶聚合、采样不越出训练 ID 和标准化不拟合留出集等关键约束。设置 `CPU_TUNING_TEST_ROOT` 指向 `codex_proc` 下的目录后，还会运行小规模完整流程；其合成数据产物保留在指定目录。
 
 ## 本机已验证结果的位置
 
@@ -65,3 +65,7 @@ foreach ($seed in @(42,123,2026)) {
 - 实际训练版本快照存于 `codex_proc\cpu-tuning\v3-executed-mlp-source.py`，与协议内源文件哈希一致。随后仅加固异常索引的拒绝检查；所有已有划分都已重新通过该检查。特征、训练、采样和指标算法未变化。
 
 三次正式运行中，原始特征 MLP 的 accuracy 为 **0.5448 ± 0.0065**，二阶邻居特征为 **0.6867 ± 0.0023**；对应 macro-F1 从 **0.3403 ± 0.0073** 到 **0.4861 ± 0.0075**。二阶特征加过采样的 macro-F1 为 **0.4908 ± 0.0103**，但准确率 **0.6831 ± 0.0065**，增益并不在每个种子上都成立。这些是固定组别的消融结果；按验证集选出的方案在三个种子分别是 hop2、hop2_ros、hop2，其最终平均准确率 **0.6824 ± 0.0053**，macro-F1 **0.4847 ± 0.0085**。
+
+## 代码结构整理
+
+训练实现位于 `cpu_tuning/mlp.py`，无标签图特征位于 `features.py`，采样、划分与指标协议位于 `protocol.py`，原始数据与记录读写位于 `io.py`，汇总和绘图由 `mlp_summary.py` 与 `plots.py` 负责。根目录旧脚本保留为兼容入口。结构整理不改变训练配置和指标算法；通过整理前后保存预测逐项比较、完整入口测试以及正式结果重算验证一致性。新运行在协议中额外记录整个包的源文件哈希，以覆盖拆分后的依赖代码。
