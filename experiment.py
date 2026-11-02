@@ -17,7 +17,8 @@ from xml.sax.saxutils import escape
 import numpy as np
 import networkx as nx
 import sklearn
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, HistGradientBoostingRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, HistGradientBoostingRegressor, ExtraTreesRegressor
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import accuracy_score, f1_score, recall_score, mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 from threadpoolctl import threadpool_info
@@ -57,11 +58,14 @@ def measures(task, truth, prediction):
 
 def make_model(task, name, params, args):
     if task == 'classification':
+        if name == 'decision_tree':
+            return DecisionTreeClassifier(random_state=args.seed, **params)
         return RandomForestClassifier(n_estimators=args.trees, n_jobs=args.jobs, random_state=args.seed, **params)
     if name == 'hist_gradient_boosting':
         return HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05, early_stopping=True,
                                              validation_fraction=0.1, n_iter_no_change=20, random_state=args.seed)
-    return RandomForestRegressor(n_estimators=args.trees, n_jobs=args.jobs, random_state=args.seed,
+    forest = ExtraTreesRegressor if name == 'extra_trees' else RandomForestRegressor
+    return forest(n_estimators=args.trees, n_jobs=args.jobs, random_state=args.seed,
                                  max_features='sqrt', **params)
 
 
@@ -71,12 +75,13 @@ def fit_eval(out, task, name, stage, params, X, y, tr, ev, args, recalls=None):
     try:
         model = make_model(task, name, params, args)
         result['model_params'] = model.get_params(deep=False)
+        X_train, y_train, X_eval, y_eval = X[tr], y[tr], X[ev], y[ev]
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            start = time.perf_counter(); model.fit(X[tr], y[tr]); result['fit_seconds'] = time.perf_counter() - start
-            start = time.perf_counter(); pred = model.predict(X[ev]); result['predict_seconds'] = time.perf_counter() - start
+            start = time.perf_counter(); model.fit(X_train, y_train); result['fit_seconds'] = time.perf_counter() - start
+            start = time.perf_counter(); pred = model.predict(X_eval); result['predict_seconds'] = time.perf_counter() - start
         result['warnings'] = [str(w.message) for w in caught]
-        result['metrics'] = measures(task, y[ev], pred)
+        result['metrics'] = measures(task, y_eval, pred)
         if recalls is not None:
             labels = np.unique(y)
             values = recall_score(y[ev], pred, labels=labels, average=None, zero_division=0)
@@ -107,8 +112,10 @@ def supervised(out, task, X, y, train, val, test, args, recalls):
     variants = [('rf_baseline', candidates[0]), ('rf_tuned', best['params'])]
     if task == 'classification':
         variants.append(('rf_balanced', dict(min_samples_leaf=5, class_weight='balanced')))
+        variants.append(('decision_tree', dict(min_samples_leaf=5)))
     else:
         variants.append(('hist_gradient_boosting', {}))
+        variants.append(('extra_trees', dict(min_samples_leaf=5)))
     failed = any(r['status'] != 'ok' for r in trials)
     for name, params in variants:
         r = fit_eval(out, task, name, 'test', params, X, y, both, test, args,
