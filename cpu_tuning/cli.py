@@ -5,6 +5,7 @@ import importlib
 import sys
 
 COMMANDS = {
+    "benchmark": ("benchmark", "Run the teacher's CPU timing comparisons"),
     "baseline": ("baseline", "Run classification, regression and Louvain baselines"),
     "summarize-baseline": ("baseline_summary", "Summarize complete baseline runs"),
     "graph-restarts": (

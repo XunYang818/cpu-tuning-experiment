@@ -42,7 +42,7 @@ def check_splits(parts, sampled, node_count):
         or len(np.unique(v)) != len(v)
         or v.min() < 0
         or v.max() >= node_count
-        for v in parts
+        for v in [*parts, sampled]
     ):
         raise ValueError("invalid split IDs")
     combined = np.concatenate(parts)

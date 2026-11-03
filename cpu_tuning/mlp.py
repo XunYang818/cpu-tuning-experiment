@@ -2,8 +2,8 @@
 
 import argparse
 import csv
-import json
 import os
+import sys
 import time
 import traceback
 import warnings
@@ -15,8 +15,9 @@ import sklearn
 from sklearn.metrics import precision_recall_fscore_support
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
-from threadpoolctl import threadpool_info
-from .io import read_array, sha256, dump, record
+from .io import (
+    read_array, sha256, dump, record, data_files, timing_environment, completed_run,
+)
 from .protocol import ARMS, MLP_PARAMS, resample_ids, check_splits, scores
 from .features import graph_cache, make_input
 
@@ -168,19 +169,22 @@ def main():
         help="Shared label-free graph feature cache",
     )
     p.add_argument("--out", required=True, type=Path)
+    p.add_argument(
+        "--data", required=True, type=Path, help="Dataset directory or raw directory"
+    )
     p.add_argument("--max-epochs", type=int, default=200)
     p.add_argument("--patience", type=int, default=20)
     p.add_argument("--ros-floor", type=int, default=200)
     a = p.parse_args()
     if min(a.max_epochs, a.patience, a.ros_floor) < 1:
         p.error("epoch, patience and floor must be positive")
-    source = json.loads((a.run / "metadata.json").read_text(encoding="utf-8-sig"))
+    source, _ = completed_run(a.run, ("split_indices.npz", "results.jsonl"))
     a.seed = source["arguments"]["seed"]
     a.out.mkdir(parents=True, exist_ok=False)
     try:
         meta = {
             "protocol": "mlp-external-validation-v1",
-            "source_run": str(a.run.resolve()),
+            "source_run": a.run.name,
             "seed": a.seed,
             "arms": ARMS,
             "mlp_params": MLP_PARAMS,
@@ -197,9 +201,11 @@ def main():
                 p.name: sha256(p) for p in sorted(Path(__file__).parent.glob("*.py"))
             },
             "numpy": np.__version__,
+            "python": sys.version,
             "scipy": scipy.__version__,
             "sklearn": sklearn.__version__,
-            "threadpools": threadpool_info(),
+            "threadpools": timing_environment()["threadpools"],
+            "timing_environment": timing_environment(),
             "threads": {
                 k: os.environ.get(k)
                 for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
@@ -208,14 +214,9 @@ def main():
         dump(
             a.out / "protocol.json", meta
         )  # Freeze all arms and selection rules before evaluation.
-        for key in ("features", "labels", "edges"):
-            if (
-                sha256(Path(source["files"][key]["path"]))
-                != source["files"][key]["sha256"]
-            ):
-                raise ValueError("source data mismatch: " + key)
-        X = read_array(Path(source["files"]["features"]["path"]), np.float32)
-        yf = read_array(Path(source["files"]["labels"]["path"]), np.float64)
+        files = data_files(a.data, source, ("features", "labels", "edges"))
+        X = read_array(files["features"], np.float32)
+        yf = read_array(files["labels"], np.float64)
         if (
             yf.shape != (len(X), 1)
             or not np.isfinite(X).all()
@@ -224,14 +225,18 @@ def main():
         ):
             raise ValueError("invalid features or labels")
         y = yf[:, 0].astype(np.int64)
-        labels = np.unique(y)
+        # The baseline records the dataset's class vocabulary before splitting.
+        labels = np.array(
+            sorted(map(int, source["data"]["label_counts"])), dtype=np.int64
+        )
+        if not np.array_equal(labels, np.unique(y)):
+            raise ValueError("baseline class vocabulary differs from the label file")
+        meta["class_labels"] = labels.tolist()
         with np.load(a.run / "split_indices.npz", allow_pickle=False) as z:
             tr, val, test, sampled = [
                 z[k].copy() for k in ("train", "validation", "test", "sampled")
             ]
         check_splits([tr, val, test], sampled, len(X))
-        if any(not np.array_equal(np.unique(y[v]), labels) for v in (tr, val, test)):
-            raise ValueError("every split must cover all classes")
         np.savez_compressed(
             a.out / "split_indices.npz",
             train=tr,
@@ -239,11 +244,13 @@ def main():
             test=test,
             sampled=sampled,
         )
+        meta["source_split_sha256"] = meta["split_sha256"]
+        meta["split_sha256"] = sha256(a.out / "split_indices.npz")
         tic = time.perf_counter()
         hops, cache_meta = graph_cache(
             a.cache,
             X,
-            Path(source["files"]["edges"]["path"]),
+            files["edges"],
             source["files"]["features"]["sha256"],
         )
         meta["cache_access_seconds"] = time.perf_counter() - tic

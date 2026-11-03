@@ -8,6 +8,7 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 from xml.sax.saxutils import escape
+from .io import sha256, same_host, completed_run, verify_artifacts
 
 EXPECTED = {
     ("classification", "rf_baseline"),
@@ -33,7 +34,13 @@ def write_csv(path, fields, rows):
 
 def config_signature(meta):
     args = meta["arguments"]
+    if not meta.get("package_source_sha256"):
+        raise ValueError("baseline lacks source hashes; rerun it before aggregation")
+    if not meta.get("timing_environment"):
+        raise ValueError("baseline lacks timing environment; rerun before aggregation")
     return {
+        "timing_environment": meta["timing_environment"],
+        "package_source_sha256": meta["package_source_sha256"],
         "data_sha256": {k: v["sha256"] for k, v in meta["files"].items()},
         "samples": args["samples"],
         "graph_nodes": args["graph_nodes"],
@@ -54,7 +61,18 @@ def load_runs(paths):
     method_signature = None
     seeds = set()
     for path in paths:
-        meta = json.loads((path / "metadata.json").read_text(encoding="utf-8-sig"))
+        meta, records = completed_run(path, ("results.jsonl",))
+        tasks = set(meta["arguments"]["tasks"])
+        if not tasks or not tasks <= {"classification", "regression", "graph"}:
+            raise ValueError(f"invalid task selection: {path}")
+        artifacts = []
+        if tasks & {"classification", "regression"}:
+            artifacts.append("split_indices.npz")
+        if "graph" in tasks:
+            artifacts.append("graph_nodes.npy")
+        if "classification" in tasks:
+            artifacts.append("class_recall.csv")
+        verify_artifacts(path, meta, artifacts)
         sig = config_signature(meta)
         if signature is None:
             signature = sig
@@ -66,14 +84,6 @@ def load_runs(paths):
         if seed in seeds:
             raise ValueError(f"duplicate seed: {seed}")
         seeds.add(seed)
-        records = [
-            json.loads(line)
-            for line in (path / "results.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
-        if any(r.get("status") != "ok" for r in records):
-            raise ValueError(f"failed run: {path}")
         methods = {}
         for r in records:
             if r.get("stage") in ("validation", "test") and r.get("name") != "rf_tuned":
@@ -100,9 +110,10 @@ def load_runs(paths):
             if key in result:
                 raise ValueError(f"duplicate result {key}: {path}")
             result[key] = r
-        if set(result) != EXPECTED:
+        expected = {key for key in EXPECTED if key[0] in tasks}
+        if set(result) != expected:
             raise ValueError(
-                f"missing or unexpected result in {path}: {set(result) ^ EXPECTED}"
+                f"missing or unexpected result in {path}: {set(result) ^ expected}"
             )
         loaded.append((seed, path, meta, records, result))
     return sorted(loaded), signature
@@ -114,6 +125,10 @@ def make_plot(path, grouped):
         ("classification", "macro_f1", "Macro F1", 1.0),
         ("regression", "mae", "MAE (years; lower is better)", None),
         ("graph", "modularity_at_1", "Graph modularity at resolution 1", 1.0),
+    ]
+    panels = [
+        panel for panel in panels
+        if any(r["task"] == panel[0] and r["metric"] == panel[1] for r in grouped)
     ]
     height = 80 + sum(
         55
@@ -129,7 +144,7 @@ def make_plot(path, grouped):
     y = 75
     for task, metric, title, bound in panels:
         rows = [r for r in grouped if r["task"] == task and r["metric"] == metric]
-        scale = bound or max(r["mean"] + r["sd"] for r in rows) * 1.1
+        scale = bound or max(r["mean"] + r["sd"] for r in rows) * 1.1 or 1.0
         svg.append(
             f'<text x="25" y="{y}" font-family="Arial" font-weight="bold" font-size="15">{escape(title)}</text>'
         )
@@ -157,6 +172,98 @@ def make_plot(path, grouped):
     path.write_text("\n".join(svg), encoding="utf-8")
 
 
+def load_class_recalls(path, meta, results):
+    """Validate every model/class row before using the long-tail comparison."""
+    labels = meta["data"]["label_counts"]
+    models = {
+        name: r for (task, name), r in results.items() if task == "classification"
+    }
+    expected = {(model, label) for model in models for label in labels}
+    with (path / "class_recall.csv").open(encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    seen = set()
+    counts = {}
+    validated = []
+    for row in rows:
+        try:
+            key = (row["model"], row["label"])
+            count = int(row["test_count"])
+            recall = float(row["recall"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid per-class recall row: {path}") from exc
+        if key in seen:
+            raise ValueError(f"duplicate per-class recall: {path} {key}")
+        if key not in expected:
+            raise ValueError(f"unexpected per-class recall: {path} {key}")
+        model, label = key
+        if (
+            not math.isfinite(recall)
+            or not 0 <= recall <= 1
+            or not 0 <= count <= min(models[model]["n_eval"], labels[label])
+            or (count == 0 and recall != 0)
+        ):
+            raise ValueError(f"invalid per-class count or recall: {path} {key}")
+        if label in counts and counts[label] != count:
+            raise ValueError(f"inconsistent per-class test counts: {path} {label}")
+        counts[label] = count
+        seen.add(key)
+        validated.append(dict(model=model, label=label, test_count=count, recall=recall))
+    if seen != expected:
+        raise ValueError(f"missing per-class recall: {path}")
+    if any(sum(counts.values()) != r["n_eval"] for r in models.values()):
+        raise ValueError(f"per-class test counts differ from evaluation size: {path}")
+    return validated
+
+
+def summarize_class_recalls(runs):
+    # Per-class recall: keep the original full-dataset class size and exclude
+    # seeds where a class has no test examples instead of treating it as zero.
+    labels = runs[0][2]["data"]["label_counts"]
+    class_values = defaultdict(list)
+    for seed, path, meta, records, result in runs:
+        if meta["data"]["label_counts"] != labels:
+            raise ValueError("class counts differ between runs")
+        for r in load_class_recalls(path, meta, result):
+            key = (r["model"], r["label"])
+            if (
+                r["model"] in ("rf_baseline", "rf_balanced")
+                and r["test_count"] > 0
+            ):
+                class_values[key].append(
+                    (seed, r["test_count"], r["recall"])
+                )
+    per_class = []
+    for label, count in sorted(labels.items(), key=lambda kv: (kv[1], int(kv[0]))):
+        base = {s: (n, value) for s, n, value in class_values[("rf_baseline", label)]}
+        balanced = {
+            s: (n, value) for s, n, value in class_values[("rf_balanced", label)]
+        }
+        if set(base) != set(balanced) or any(
+            base[s][0] != balanced[s][0] for s in base
+        ):
+            raise ValueError(f"inconsistent per-class test counts for {label}")
+        common = sorted(base)
+        diffs = [balanced[s][1] - base[s][1] for s in common]
+        per_class.append(
+            {
+                "label": label,
+                "dataset_count": count,
+                "n_seeds_with_test_examples": len(common),
+                "mean_test_count": statistics.mean(base[s][0] for s in common)
+                if common
+                else "",
+                "baseline_mean_recall": statistics.mean(base[s][1] for s in common)
+                if common
+                else "",
+                "balanced_mean_recall": statistics.mean(balanced[s][1] for s in common)
+                if common
+                else "",
+                "mean_paired_delta": statistics.mean(diffs) if common else "",
+            }
+        )
+    return per_class
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", nargs="+", type=Path, required=True)
@@ -166,6 +273,9 @@ def main():
     if len(args.runs) < 2:
         parser.error("at least two complete runs required")
     runs, signature = load_runs(args.runs)
+    tasks = set(signature["tasks"])
+    if args.graph_restarts and "graph" not in tasks:
+        parser.error("graph-restarts requires runs containing the graph task")
     detailed, samples = [], defaultdict(list)
     for seed, path, meta, records, results in runs:
         for (task, model), r in results.items():
@@ -195,7 +305,7 @@ def main():
                         "model": model,
                         "metric": metric,
                         "value": value,
-                        "source": str(path / "results.jsonl"),
+                        "source": f"{path.name}/results.jsonl",
                     }
                 )
                 samples[(task, model, metric)].append(value)
@@ -208,7 +318,7 @@ def main():
                         "model": "parameter_search",
                         "metric": "search_seconds",
                         "value": r["search_seconds"],
-                        "source": str(path / "results.jsonl"),
+                        "source": f"{path.name}/results.jsonl",
                     }
                 )
                 samples[(r["task"], "parameter_search", "search_seconds")].append(
@@ -240,6 +350,8 @@ def main():
         ("regression", "extra_trees", "mae"),
         ("regression", "hist_gradient_boosting", "mae"),
     ]:
+        if task not in tasks:
+            continue
         differences = [
             lookup[(seed, task, model, metric)]
             - lookup[(seed, task, "rf_baseline", metric)]
@@ -259,69 +371,18 @@ def main():
                 ),
             }
         )
-    # Per-class recall: keep the original full-dataset class size and exclude
-    # seeds where a class has no test examples instead of treating it as zero.
-    labels = runs[0][2]["data"]["label_counts"]
-    class_values = defaultdict(list)
-    for seed, path, meta, records, result in runs:
-        if meta["data"]["label_counts"] != labels:
-            raise ValueError("class counts differ between runs")
-        with (path / "class_recall.csv").open(encoding="utf-8-sig", newline="") as f:
-            recall_rows = list(csv.DictReader(f))
-        seen = set()
-        for r in recall_rows:
-            key = (r["model"], r["label"])
-            if key in seen:
-                raise ValueError(f"duplicate per-class recall: {path} {key}")
-            seen.add(key)
-            if (
-                r["model"] in ("rf_baseline", "rf_balanced")
-                and int(r["test_count"]) > 0
-            ):
-                class_values[key].append(
-                    (seed, int(r["test_count"]), float(r["recall"]))
-                )
-        expected = {
-            (model, label)
-            for model in ("rf_baseline", "rf_balanced")
-            for label in labels
-        }
-        if not expected.issubset(seen):
-            raise ValueError(f"missing per-class recall: {path}")
-    per_class = []
-    for label, count in sorted(labels.items(), key=lambda kv: (kv[1], int(kv[0]))):
-        base = {s: (n, value) for s, n, value in class_values[("rf_baseline", label)]}
-        balanced = {
-            s: (n, value) for s, n, value in class_values[("rf_balanced", label)]
-        }
-        if set(base) != set(balanced) or any(
-            base[s][0] != balanced[s][0] for s in base
-        ):
-            raise ValueError(f"inconsistent per-class test counts for {label}")
-        common = sorted(base)
-        diffs = [balanced[s][1] - base[s][1] for s in common]
-        per_class.append(
-            {
-                "label": label,
-                "dataset_count": count,
-                "n_seeds_with_test_examples": len(common),
-                "mean_test_count": statistics.mean(base[s][0] for s in common)
-                if common
-                else "",
-                "baseline_mean_recall": statistics.mean(base[s][1] for s in common)
-                if common
-                else "",
-                "balanced_mean_recall": statistics.mean(balanced[s][1] for s in common)
-                if common
-                else "",
-                "mean_paired_delta": statistics.mean(diffs) if common else "",
-            }
-        )
+    per_class = summarize_class_recalls(runs) if "classification" in tasks else []
     graph_rows = []
-    by_run = {str(path.resolve()): seed for seed, path, *_ in runs}
+    by_run = {
+        (sha256(path / "metadata.json"), sha256(path / "graph_nodes.npy")): seed
+        for seed, path, *_ in runs
+    } if "graph" in tasks else {}
     for path in args.graph_restarts:
         result = json.loads((path / "selection.json").read_text(encoding="utf-8"))
-        run_path = str(Path(result["main_run"]).resolve())
+        if (not same_host(result.get("timing_environment", {}), signature["timing_environment"])
+                or result.get("thread_environment") != signature["thread_environment"]):
+            raise ValueError("graph restart timing environment differs from main runs")
+        run_path = (result.get("main_metadata_sha256"), result.get("graph_nodes_sha256"))
         if run_path not in by_run:
             raise ValueError(f"graph restart does not match a main run: {path}")
         trials = [
@@ -356,7 +417,7 @@ def main():
                 "total_fit_seconds": result["total_fit_seconds"],
                 "total_scoring_seconds": result["total_scoring_seconds"],
                 "selected_seed": result["selected"]["seed"],
-                "source": str(path / "selection.json"),
+                "source": f"{path.name}/selection.json",
             }
         )
     if graph_rows and (
@@ -389,19 +450,20 @@ def main():
         ],
         paired,
     )
-    write_csv(
-        args.out / "recall_by_class.csv",
-        [
-            "label",
-            "dataset_count",
-            "n_seeds_with_test_examples",
-            "mean_test_count",
-            "baseline_mean_recall",
-            "balanced_mean_recall",
-            "mean_paired_delta",
-        ],
-        per_class,
-    )
+    if "classification" in tasks:
+        write_csv(
+            args.out / "recall_by_class.csv",
+            [
+                "label",
+                "dataset_count",
+                "n_seeds_with_test_examples",
+                "mean_test_count",
+                "baseline_mean_recall",
+                "balanced_mean_recall",
+                "mean_paired_delta",
+            ],
+            per_class,
+        )
     if graph_rows:
         write_csv(
             args.out / "graph_restarts.csv",
@@ -423,7 +485,7 @@ def main():
         json.dumps(
             {
                 "runs": [
-                    {"seed": seed, "path": str(path.resolve())}
+                    {"seed": seed, "path": path.name}
                     for seed, path, *_ in runs
                 ],
                 "shared_config": signature,

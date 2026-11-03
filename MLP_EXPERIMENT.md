@@ -1,6 +1,6 @@
 # 分类改进：MLP、引用邻居特征与温和过采样
 
-本轮依据《给同学的改进建议》预先声明五组对照，使用自己的机器重新运行。建议中的参考数值不作为本实验结果。此前随机森林、回归和社区发现的结果保留，本轮集中解决分类效果不足的问题。
+本流程预先声明五组分类对照，补充教师 MLP 基线，并检查引用邻居特征和温和过采样的作用。全部指标由实际运行生成；参考数值与旧版结果不作为当前版本的成绩。
 
 ## 五组对照及解释范围
 
@@ -31,22 +31,18 @@ MLP 的隐藏层配置相同，但增加输入维度也增加了第一层参数�
 
 ## 复现
 
-先从项目 README 建好环境。需要 SciPy（当前 scikit-learn 环境中已存在，代码不自动安装）。所有命令建议设置 `PYTHONDONTWRITEBYTECODE=1`、`OMP_NUM_THREADS=1`、`MKL_NUM_THREADS=1`、`OPENBLAS_NUM_THREADS=1`。缓存和输出均位于挂载项目根目录的 `codex_proc`。每次输出目录必须尚不存在。
+准备及 `$data`、`$work` 的含义见 README。先为各种子运行 `baseline`，再运行：
 
 ```powershell
-$conda = 'D:\miniforge3\Scripts\conda.exe'
-$env:PYTHONDONTWRITEBYTECODE='1'
-$env:OMP_NUM_THREADS='1'; $env:MKL_NUM_THREADS='1'; $env:OPENBLAS_NUM_THREADS='1'
 foreach ($seed in @(42,123,2026)) {
-  & $conda run --no-capture-output -n cpu-tuning-experiment python -B run.py mlp --run "D:\作业\数据挖掘\codex_proc\cpu-tuning\v2-full-50000-$seed" --cache 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-graph-features' --out "D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-$seed"
-  if ($LASTEXITCODE -ne 0) { throw "实验失败：$seed" }
+  python -B run.py mlp --data $data --run "$work/baseline-$seed" --cache "$work/features" --out "$work/mlp-$seed"
+  if ($LASTEXITCODE -ne 0) { throw "MLP 失败：$seed" }
 }
-& $conda run --no-capture-output -n cpu-tuning-experiment python -B run.py summarize-mlp --runs 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-42' 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-123' 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-2026' --out 'D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-summary'
+python -B run.py summarize-mlp --data $data --runs "$work/mlp-42" "$work/mlp-123" "$work/mlp-2026" --out "$work/mlp-summary"
+python -B run.py plot-mlp --summary "$work/mlp-summary" --out "$work/mlp-figures"
 ```
 
-汇总会从保存的预测重新计算指标，核对真实节点标签、划分、选型及逐轮曲线；同时检查每次配置和数据哈希相同。输出逐种子指标、均值及样本标准差、配对差值、逐类别结果、验证选择和学习曲线。三次重复不支持夸大统计显著性。
-
-绘图脚本 `python -B run.py plot-mlp --summary <汇总目录> --out <新的图目录>` 使用 Matplotlib，输出 PNG/SVG。它不参与训练、调参或指标计算。本机实验环境已获准补装 Matplotlib；绘图前可设置 `MPLCONFIGDIR` 指向 `codex_proc` 下的缓存目录。
+共享缓存先由一个进程构建完成，不支持多进程同时构建。缓存签名同时包含生成源码哈希；源码或数据改变时应指定新的缓存目录。MLP 要求输入基线已完成且保存划分未变。汇总从保存预测重算总体与逐类指标，并核对训练/过采样数量、稀有类标记、数据哈希、划分和计时环境；重新指定数据位置后仍可使用复制的结果目录。旧版结果可能不包含新版完成标记、自包含划分哈希或计时环境，需要重新运行。输出逐种子指标、均值、样本标准差、配对差值和学习曲线；三次重复不足以支持夸大的统计结论。
 
 ## 耗时与溯源
 
@@ -54,18 +50,8 @@ foreach ($seed in @(42,123,2026)) {
 
 图特征计算、缓存保存、缓存访问、采样与标准化、验证搜索、最终训练和最终预测分别计时。最终训练耗时不包含验证搜索和图特征构造；应连同这些额外成本报告。已有回归和社区结果在独立文件保留，不能把分类特征的提升直接套用到回归或社区任务。
 
-协议与入口测试：`python -B -m unittest discover -s tests -v`，覆盖无向边去重、自环、孤立节点、两阶聚合、采样不越出训练 ID 和标准化不拟合留出集等关键约束。设置 `CPU_TUNING_TEST_ROOT` 指向 `codex_proc` 下的目录后，还会运行小规模完整流程；其合成数据产物保留在指定目录。
-
-## 本机已验证结果的位置
-
-- 三次原始运行：`D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-{42,123,2026}`。
-- 最终核验与汇总：`D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-summary-final`。
-- 同一 Miniforge 环境生成的 PNG/SVG 图表：`D:\作业\数据挖掘\codex_proc\cpu-tuning\v3-mlp-figures-conda`。
-- `fact_notes.md` 保存本轮事实及限制；`validation_selected_mean_sd.csv` 保存实际按验证集选择方案的最终表现。
-- 实际训练版本快照存于 `codex_proc\cpu-tuning\v3-executed-mlp-source.py`，与协议内源文件哈希一致。随后仅加固异常索引的拒绝检查；所有已有划分都已重新通过该检查。特征、训练、采样和指标算法未变化。
-
-三次正式运行中，原始特征 MLP 的 accuracy 为 **0.5448 ± 0.0065**，二阶邻居特征为 **0.6867 ± 0.0023**；对应 macro-F1 从 **0.3403 ± 0.0073** 到 **0.4861 ± 0.0075**。二阶特征加过采样的 macro-F1 为 **0.4908 ± 0.0103**，但准确率 **0.6831 ± 0.0065**，增益并不在每个种子上都成立。这些是固定组别的消融结果；按验证集选出的方案在三个种子分别是 hop2、hop2_ros、hop2，其最终平均准确率 **0.6824 ± 0.0053**，macro-F1 **0.4847 ± 0.0085**。
+协议与入口测试：`python -B -m unittest discover -s tests -v`，覆盖无向边去重、自环、孤立节点、两阶聚合、采样不越出训练 ID 和标准化不拟合留出集等关键约束。设置 `CPU_TUNING_TEST_ROOT` 指向测试产物目录后，还会运行小规模完整流程；其合成数据产物保留在指定目录。
 
 ## 代码结构整理
 
-训练实现位于 `cpu_tuning/mlp.py`，无标签图特征位于 `features.py`，采样、划分与指标协议位于 `protocol.py`，原始数据与记录读写位于 `io.py`，汇总和绘图由 `mlp_summary.py` 与 `plots.py` 负责。根目录旧脚本保留为兼容入口。结构整理不改变训练配置和指标算法；通过整理前后保存预测逐项比较、完整入口测试以及正式结果重算验证一致性。新运行在协议中额外记录整个包的源文件哈希，以覆盖拆分后的依赖代码。
+训练实现位于 `cpu_tuning/mlp.py`，无标签图特征位于 `features.py`，采样、划分与指标协议位于 `protocol.py`，原始数据与记录读写位于 `io.py`，汇总和绘图由 `mlp_summary.py` 与 `plots.py` 负责。根目录旧脚本保留为兼容入口。新运行在协议中记录整个包的源文件哈希，以覆盖拆分后的依赖代码。源代码或指标口径变化后应重新运行，避免混用历史耗时与当前结果。

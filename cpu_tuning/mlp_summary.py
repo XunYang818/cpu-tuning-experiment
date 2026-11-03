@@ -11,8 +11,9 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 import numpy as np
+from sklearn.metrics import precision_recall_fscore_support
 from .protocol import ARMS, scores, check_splits
-from .io import read_array, sha256, dump
+from .io import read_array, sha256, dump, data_files
 
 
 def write_csv(path, rows):
@@ -24,10 +25,46 @@ def write_csv(path, rows):
         w.writerows(rows)
 
 
+def audit_class_rows(rows, predictions, y, train, labels, rare, floor):
+    """Recompute the long-tail table from predictions and training membership."""
+    by_key = {}
+    for row in rows:
+        key = (row["name"], int(row["label"]))
+        if key in by_key:
+            raise ValueError("duplicate per-class result")
+        by_key[key] = row
+    expected = {(name, int(label)) for name, _, _ in ARMS for label in labels}
+    if set(by_key) != expected:
+        raise ValueError("missing or unexpected per-class result")
+    for name, _, ros in ARMS:
+        precision, recall, f1, support = precision_recall_fscore_support(
+            predictions["truth"], predictions[name], labels=labels, zero_division=0
+        )
+        for i, label in enumerate(labels):
+            original = int(np.count_nonzero(y[train] == label))
+            # Resampling can only duplicate classes present in training.
+            fitted = max(original, floor) if ros and original else original
+            expected_values = {
+                "original_train_count": original,
+                "fitted_train_count": fitted,
+                "test_count": int(support[i]),
+                "precision": float(precision[i]),
+                "recall": float(recall[i]),
+                "f1": float(f1[i]),
+            }
+            row = by_key[name, int(label)]
+            if any(
+                not math.isclose(float(row[k]), value, rel_tol=0, abs_tol=1e-12)
+                for k, value in expected_values.items()
+            ) or row["rare10"] != str(bool(label in rare)):
+                raise ValueError(f"per-class result differs from predictions: {name}, {label}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--runs", nargs="+", required=True, type=Path)
     p.add_argument("--out", required=True, type=Path)
+    p.add_argument("--data", required=True, type=Path)
     args = p.parse_args()
     if len(args.runs) < 2:
         p.error("at least two runs required")
@@ -53,13 +90,21 @@ def main():
                 "patience",
                 "ros_floor",
                 "source_sha256",
+                "python",
                 "numpy",
                 "scipy",
                 "sklearn",
                 "threads",
             )
         }
-        signature["package_source_sha256"] = meta.get("package_source_sha256")
+        if not meta.get("timing_environment"):
+            raise ValueError(
+                "MLP run lacks timing environment; rerun before aggregation"
+            )
+        signature["timing_environment"] = meta["timing_environment"]
+        if not meta.get("package_source_sha256"):
+            raise ValueError("MLP run lacks source hashes; rerun before aggregation")
+        signature["package_source_sha256"] = meta["package_source_sha256"]
         signature["data_hashes"] = {
             k: meta["files"][k]["sha256"] for k in ("features", "labels", "edges")
         }
@@ -71,14 +116,12 @@ def main():
         if seed in seen:
             raise ValueError("duplicate seed")
         seen.add(seed)
-        source = Path(meta["source_run"])
+        source = path
         if sha256(source / "split_indices.npz") != meta["split_sha256"]:
             raise ValueError("source split changed")
         if raw_y is None:
-            label_path = Path(meta["files"]["labels"]["path"])
-            if sha256(label_path) != meta["files"]["labels"]["sha256"]:
-                raise ValueError("labels changed")
-            raw_y = read_array(label_path, np.int64).ravel()
+            files = data_files(args.data, meta, ("features", "labels", "edges"))
+            raw_y = read_array(files["labels"], np.int64).ravel()
         with np.load(source / "split_indices.npz", allow_pickle=False) as split:
             check_splits(
                 [split["train"], split["validation"], split["test"]],
@@ -87,8 +130,13 @@ def main():
             )
             train = np.concatenate([split["train"], split["validation"]])
             test = split["test"].copy()
-        labels, counts = np.unique(raw_y[train], return_counts=True)
-        rare = labels[np.lexsort((labels, counts))[:10]]
+        train_labels, counts = np.unique(raw_y[train], return_counts=True)
+        rare = train_labels[np.lexsort((train_labels, counts))[:10]]
+        # Older runs did not store the vocabulary; they required all classes in
+        # every split, so the full label file reconstructs the same vocabulary.
+        labels = np.asarray(meta.get("class_labels", np.unique(raw_y)), dtype=np.int64)
+        if not np.array_equal(labels, np.unique(raw_y)):
+            raise ValueError("class vocabulary differs from the label file")
         records = [
             json.loads(line)
             for line in (path / "results.jsonl")
@@ -140,6 +188,11 @@ def main():
                     for k, value in computed.items()
                 ):
                     raise ValueError("metrics do not match saved predictions")
+            with (path / "per_class.csv").open(encoding="utf-8-sig", newline="") as f:
+                per_class = list(csv.DictReader(f))
+            audit_class_rows(
+                per_class, pred, raw_y, train, labels, rare, meta["ros_floor"]
+            )
         selection_record = next(r for r in records if r["stage"] == "selection")
         by_name = {r["name"]: r for r in results}
         for r in results:
@@ -159,7 +212,7 @@ def main():
                         name=r["name"],
                         metric=metric,
                         value=value,
-                        source=str(path / "results.jsonl"),
+                        source=f"{path.name}/results.jsonl",
                     )
                 )
         selected.append(
@@ -204,12 +257,11 @@ def main():
                         **r["metrics"],
                     )
                 )
-        with (path / "per_class.csv").open(encoding="utf-8-sig", newline="") as f:
-            class_rows.extend(dict(seed=seed, **r) for r in csv.DictReader(f))
+        class_rows.extend(dict(seed=seed, **r) for r in per_class)
         protocols.append(
             {
                 "seed": seed,
-                "path": str(path.resolve()),
+                "path": path.name,
                 "cache": meta["graph_cache"],
                 "source_split_sha256": meta["split_sha256"],
                 "warnings": {r["name"]: r["warnings"] for r in results},
@@ -285,6 +337,7 @@ def main():
         args.out / "audit.json",
         {
             "prediction_metrics_verified": True,
+            "per_class_metrics_verified": True,
             "runs": protocols,
             "shared_protocol": reference,
             "note": "Sample SD uses n-1; test splits previously seen in tree experiments; graph feature arms are transductive.",

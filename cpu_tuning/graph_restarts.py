@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -9,7 +10,7 @@ import networkx as nx
 import numpy as np
 
 sys.dont_write_bytecode = True
-from .io import read_array, sha256
+from .io import read_edges, sha256, data_files, timing_environment, same_host, completed_run
 
 
 def main():
@@ -19,16 +20,21 @@ def main():
     )
     p.add_argument("--out", required=True, type=Path, help="New output directory")
     p.add_argument("--restarts", type=int, default=3)
+    p.add_argument("--data", required=True, type=Path)
     a = p.parse_args()
     if a.restarts < 2:
         p.error("restarts must be at least two")
-    meta = json.loads((a.run / "metadata.json").read_text(encoding="utf-8-sig"))
+    meta, rows = completed_run(a.run, ("graph_nodes.npy", "results.jsonl"))
     if nx.__version__ != meta["networkx"]:
         raise ValueError("networkx version differs from the main run")
-    rows = [
-        json.loads(line)
-        for line in (a.run / "results.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    if not same_host(meta.get("timing_environment", {}), timing_environment()):
+        raise ValueError("host differs from the main run")
+    threads = {
+        k: os.environ.get(k)
+        for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+    }
+    if threads != meta["thread_environment"]:
+        raise ValueError("thread settings differ from the main run")
     baseline = [
         r
         for r in rows
@@ -38,26 +44,19 @@ def main():
     ]
     if len(baseline) != 1 or any(r.get("status") != "ok" for r in rows):
         raise ValueError("main run is incomplete or failed")
-    edge_path = Path(meta["files"]["edges"]["path"])
-    if sha256(edge_path) != meta["files"]["edges"]["sha256"]:
-        raise ValueError("edge file differs from main run")
+    edge_path = data_files(a.data, meta, ("edges",))["edges"]
     nodes = np.load(a.run / "graph_nodes.npy", allow_pickle=False)
     node_count = meta["data"]["features_shape"][0]
     if (
-        len(nodes) != meta["arguments"]["graph_nodes"]
+        nodes.ndim != 1
+        or not np.issubdtype(nodes.dtype, np.integer)
+        or len(nodes) != meta["arguments"]["graph_nodes"]
         or len(np.unique(nodes)) != len(nodes)
         or np.any(nodes < 0)
         or np.any(nodes >= node_count)
     ):
         raise ValueError("invalid saved node set")
-    edges = read_array(edge_path, np.int64)
-    if (
-        edges.shape[1] != 2
-        or edges.size == 0
-        or edges.min() < 0
-        or edges.max() >= node_count
-    ):
-        raise ValueError("invalid edges")
+    edges = read_edges(edge_path, node_count)
     selected = np.zeros(node_count, dtype=bool)
     selected[nodes] = True
     induced = edges[selected[edges[:, 0]] & selected[edges[:, 1]]]
@@ -99,7 +98,11 @@ def main():
         raise ValueError("recreated baseline modularity differs from main run")
     best = max(trials, key=lambda t: t["modularity_at_1"])
     result = {
-        "main_run": str(a.run.resolve()),
+        "main_run": a.run.name,
+        "timing_environment": timing_environment(),
+        "thread_environment": threads,
+        "main_metadata_sha256": sha256(a.run / "metadata.json"),
+        "graph_nodes_sha256": sha256(a.run / "graph_nodes.npy"),
         "edge_sha256": meta["files"]["edges"]["sha256"],
         "baseline": trials[0],
         "selected": best,

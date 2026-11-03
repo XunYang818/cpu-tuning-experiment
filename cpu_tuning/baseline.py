@@ -31,19 +31,26 @@ from sklearn.metrics import (
     r2_score,
 )
 from sklearn.model_selection import train_test_split
-from threadpoolctl import threadpool_info
-from .io import dump, sha256, read_array, record
+from .io import dump, sha256, read_array, read_edges, record, timing_environment
 
 
-def measures(task, truth, prediction):
+def measures(task, truth, prediction, labels=None):
     if task == "classification":
         return {
             "accuracy": float(accuracy_score(truth, prediction)),
             "macro_f1": float(
-                f1_score(truth, prediction, average="macro", zero_division=0)
+                f1_score(
+                    truth, prediction, labels=labels, average="macro", zero_division=0
+                )
             ),
             "weighted_f1": float(
-                f1_score(truth, prediction, average="weighted", zero_division=0)
+                f1_score(
+                    truth,
+                    prediction,
+                    labels=labels,
+                    average="weighted",
+                    zero_division=0,
+                )
             ),
         }
     return {
@@ -102,9 +109,9 @@ def fit_eval(out, task, name, stage, params, X, y, tr, ev, args, recalls=None):
             pred = model.predict(X_eval)
             result["predict_seconds"] = time.perf_counter() - start
         result["warnings"] = [str(w.message) for w in caught]
-        result["metrics"] = measures(task, y_eval, pred)
+        labels = np.unique(y) if task == "classification" else None
+        result["metrics"] = measures(task, y_eval, pred, labels)
         if recalls is not None:
-            labels = np.unique(y)
             values = recall_score(
                 y[ev], pred, labels=labels, average=None, zero_division=0
             )
@@ -141,7 +148,7 @@ def supervised(out, task, X, y, train, val, test, args, recalls):
     best = max(
         good,
         key=lambda r: (
-            r["metrics"]["accuracy"]
+            (r["metrics"]["macro_f1"], r["metrics"]["accuracy"])
             if task == "classification"
             else -r["metrics"]["mae"]
         ),
@@ -154,7 +161,9 @@ def supervised(out, task, X, y, train, val, test, args, recalls):
             "status": "ok",
             "selected": best["name"],
             "params": best["params"],
-            "criterion": "accuracy" if task == "classification" else "mae",
+            "criterion": "macro_f1, then accuracy"
+            if task == "classification"
+            else "mae",
             "search_seconds": duration,
             "candidate_count": len(candidates),
         },
@@ -190,14 +199,7 @@ def supervised(out, task, X, y, train, val, test, args, recalls):
 
 
 def graph_experiment(out, edge_path, count, args, raw_count):
-    edges = read_array(edge_path, np.int64)
-    if (
-        edges.shape[1] != 2
-        or edges.size == 0
-        or edges.min() < 0
-        or edges.max() >= raw_count
-    ):
-        raise ValueError("edge table must have two valid node-ID columns")
+    edges = read_edges(edge_path, raw_count)
     rng = np.random.RandomState(args.seed + 1)
     nodes = rng.choice(raw_count, count, replace=False)
     np.save(out / "graph_nodes.npy", nodes)
@@ -357,9 +359,7 @@ def main():
     a.out.mkdir(parents=True, exist_ok=False)
     try:
         metadata = {
-            "arguments": {
-                k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()
-            },
+            "arguments": {k: v for k, v in vars(a).items() if k not in ("data", "out")},
             "python": sys.version,
             "platform": platform.platform(),
             "processor": platform.processor(),
@@ -367,14 +367,17 @@ def main():
             "numpy": np.__version__,
             "sklearn": sklearn.__version__,
             "networkx": nx.__version__,
-            "threadpools": threadpool_info(),
+            "threadpools": timing_environment()["threadpools"],
+            "timing_environment": timing_environment(),
+            "package_source_sha256": {
+                p.name: sha256(p) for p in sorted(Path(__file__).parent.glob("*.py"))
+            },
             "thread_environment": {
                 k: os.environ.get(k)
                 for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
             },
             "files": {
-                k: {"path": str(v.resolve()), "sha256": sha256(v)}
-                for k, v in files.items()
+                k: {"name": v.name, "sha256": sha256(v)} for k, v in files.items()
             },
         }
         X = read_array(files["features"], np.float32)
@@ -391,7 +394,10 @@ def main():
             raise ValueError("missing/nonfinite data or non-integer labels")
         y = labels[:, 0].astype(np.int64)
         yr = years[:, 0]
-        if a.samples > len(X) or a.graph_nodes > len(X):
+        if (
+            any(t in a.tasks for t in ("classification", "regression"))
+            and a.samples > len(X)
+        ) or ("graph" in a.tasks and a.graph_nodes > len(X)):
             raise ValueError("sample size exceeds node count")
         counts = Counter(y.tolist())
         metadata["data"] = {
@@ -401,20 +407,22 @@ def main():
             "year_max": float(yr.max()),
         }
         dump(a.out / "metadata.json", metadata)
-        idx = np.random.RandomState(a.seed).choice(len(X), a.samples, replace=False)
-        dev, test = train_test_split(
-            idx, test_size=0.3, stratify=y[idx], random_state=a.seed
-        )
-        train, val = train_test_split(
-            dev, test_size=0.2, stratify=y[dev], random_state=a.seed
-        )
-        np.savez_compressed(
-            a.out / "split_indices.npz",
-            sampled=idx,
-            train=train,
-            validation=val,
-            test=test,
-        )
+        train = val = test = None
+        if any(task in a.tasks for task in ("classification", "regression")):
+            idx = np.random.RandomState(a.seed).choice(len(X), a.samples, replace=False)
+            dev, test = train_test_split(
+                idx, test_size=0.3, stratify=y[idx], random_state=a.seed
+            )
+            train, val = train_test_split(
+                dev, test_size=0.2, stratify=y[dev], random_state=a.seed
+            )
+            np.savez_compressed(
+                a.out / "split_indices.npz",
+                sampled=idx,
+                train=train,
+                validation=val,
+                test=test,
+            )
         recalls = []
         failures = []
         for task in a.tasks:
@@ -466,6 +474,16 @@ def main():
         raise
     finally:
         summarize(a.out)
+    # Mark complete only after training and the final result tables succeed.
+    metadata["artifact_sha256"] = {
+        name: sha256(a.out / name)
+        for name in (
+            "split_indices.npz", "graph_nodes.npy", "results.jsonl", "class_recall.csv"
+        )
+        if (a.out / name).is_file()
+    }
+    metadata["status"] = "complete"
+    dump(a.out / "metadata.json", metadata)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,10 @@
 
 import json
 import time
+from pathlib import Path
 import numpy as np
 from scipy import sparse
-from .io import read_array, sha256, dump
+from .io import read_edges, sha256, dump
 
 
 def aggregate_features(X, edges):
@@ -48,10 +49,18 @@ def graph_cache(cache, X, edge_path, feature_hash):
         "features_sha256": feature_hash,
         "edges_sha256": sha256(edge_path),
         "protocol": "undirected-binary-self-loop-row-mean-v1",
+        "source_sha256": sha256(Path(__file__)),
         "shape": list(X.shape),
     }
-    if cache.exists():
-        meta = json.loads((cache / "metadata.json").read_text(encoding="utf-8"))
+    metadata_path = cache / "metadata.json"
+    meta = None
+    if metadata_path.exists():
+        try:
+            meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            # An interrupted metadata write is an incomplete cache; rebuild it.
+            pass
+    if meta is not None:
         if meta["signature"] != signature:
             raise ValueError("graph cache signature mismatch")
         arrays = []
@@ -64,8 +73,17 @@ def graph_cache(cache, X, edge_path, feature_hash):
                 raise ValueError("cache shape/dtype mismatch")
             arrays.append(a)
         return arrays, meta
-    cache.mkdir(parents=True, exist_ok=False)
-    edges = read_array(edge_path, np.float64)
+    if cache.exists():
+        unexpected = {p.name for p in cache.iterdir()} - {
+            "hop1.npy",
+            "hop2.npy",
+            "metadata.json",
+        }
+        if unexpected:
+            raise ValueError("incomplete graph cache contains unexpected files")
+    else:
+        cache.mkdir(parents=True, exist_ok=False)
+    edges = read_edges(edge_path, len(X))
     tic = time.perf_counter()
     H1, H2, info = aggregate_features(X, edges)
     compute_time = time.perf_counter() - tic

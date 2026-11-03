@@ -35,6 +35,10 @@ def main():
     values = rows(a.summary / "per_seed.csv")
     curves = rows(a.summary / "learning_curves.csv")
     audit = json.loads((a.summary / "audit.json").read_text(encoding="utf-8"))
+    protocol = audit["shared_protocol"]
+    seed_count = len(audit["runs"])
+    class_count = len({r["label"] for r in rows(a.summary / "per_class.csv")})
+    rare_count = min(10, class_count)
     a.out.mkdir(parents=True, exist_ok=False)
     lookup = {(r["name"], r["metric"]): r for r in means}
     plt.rcParams.update(
@@ -49,7 +53,11 @@ def main():
     for ax, metric, title in zip(
         axs,
         ["accuracy", "macro_f1", "rare10_macro_f1"],
-        ["Accuracy", "Macro F1 (40 classes)", "Macro F1 (10 rarest training classes)"],
+        [
+            "Accuracy",
+            f"Macro F1 ({class_count} classes)",
+            f"Macro F1 ({rare_count} rarest training classes)",
+        ],
     ):
         for i, name in enumerate(NAMES):
             r = lookup[name, metric]
@@ -75,12 +83,12 @@ def main():
         ax.yaxis.grid(True, alpha=0.18)
         ax.set_axisbelow(True)
     fig.suptitle(
-        "MLP ablation: fixed splits, three seeds, mean ± sample SD", fontsize=14
+        f"MLP ablation: fixed splits, {seed_count} seeds, mean ± sample SD", fontsize=14
     )
     fig.text(
         0.5,
         0.01,
-        "Dots: individual seeds. Graph-feature arms use the full unlabeled graph (transductive). ROS: minority floor = 200.",
+        f"Dots: individual seeds. Graph-feature arms use the full unlabeled graph (transductive). ROS: minority floor = {protocol['ros_floor']}.",
         ha="center",
         fontsize=10,
     )
@@ -97,7 +105,7 @@ def main():
         ax.bar(range(5), vals, bottom=bottom, label=label, color=color)
         bottom += vals
     ax.set_xticks(range(5), LABELS)
-    ax.set_ylabel("Seconds (three-seed mean)")
+    ax.set_ylabel(f"Seconds ({seed_count}-seed mean)")
     ax.set_title("Final training and prediction cost")
     ax.legend()
     feature_time = audit["runs"][0]["cache"]["compute_seconds"]

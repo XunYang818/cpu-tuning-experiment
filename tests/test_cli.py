@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class CommandTests(unittest.TestCase):
     def test_every_command_exposes_its_own_options(self):
         expected = {
+            "benchmark": "--data",
             "baseline": "--data",
             "summarize-baseline": "--runs",
             "graph-restarts": "--restarts",

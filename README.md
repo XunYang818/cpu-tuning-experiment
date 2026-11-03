@@ -1,98 +1,49 @@
 # CPU 数据挖掘调优实验
 
-以教师 `benchmark.py` 为参考，覆盖论文分类、年份回归和图社区发现，全部在 CPU 上执行。项目按三条主线组织：模型与参数对照、引用关系辅助特征、类别不均衡处理。详细协议分别见 [基线及图任务](BASELINE_EXPERIMENT.md) 和 [MLP 分类改进](MLP_EXPERIMENT.md)。
+以 arXiv 论文数据为例，在 CPU 上比较分类、年份回归和 Louvain 社区发现。对应调优课件的三个改进角度：参数调优（随机森林叶节点与深度）、模型替换（决策树、MLP、HGBR、Extra Trees）、长尾处理与评价（类别加权、过采样、macro-F1 与逐类召回）。引用邻居特征作为 MLP 的扩展消融。
 
-## 从哪里读代码
+按以下顺序运行：教师基准计时 → 训练/验证/测试划分与树模型调优 → 复用划分运行 MLP 对照 → 多种子汇总与绘图。随机森林参数、MLP 轮数和 MLP 主方案在验证集上选择；其余模型作为预先声明的对照。最终测试只用于评价。
 
-```text
-run.py                       统一命令入口
-cpu_tuning/
-  cli.py                     命令分发，按需加载各阶段
-  io.py                      数据读取、哈希、JSON 结果记录
-  protocol.py                MLP 对照配置、划分检查、训练集采样、分类指标
-  features.py                无标签引用图特征及缓存
-  baseline.py                分类/回归基线、参数搜索、Louvain 对照
-  mlp.py                     外部验证早停、最终重训、预测保存
-  graph_restarts.py          固定图和分辨率的 Louvain 重启
-  baseline_summary.py        基线多种子汇总
-  mlp_summary.py             从保存预测核验指标并汇总
-  plots.py                   从已核验的 CSV 生成 PNG/SVG
-tests/                       协议、命令入口和小规模完整流程测试
-```
+## 准备
 
-数据与记录读写、协议、特征模块不依赖训练入口；汇总器不导入训练脚本。根目录的六个旧脚本仅用于兼容原有命令，实际实现集中在包内。
+使用 `conda env create -f environment.yml` 创建 OpenBLAS 环境，再执行 `conda activate cpu-tuning-experiment`。务必激活环境后运行，直接调用环境内的 Python 可能缺少 Windows DLL 搜索路径。课件使用 Python 3.9；本项目环境使用 Python 3.11，不把跨版本耗时视作严格复现。也可按 `requirements.txt` 安装训练依赖，绘图另需 `requirements-plot.txt`。`conda-win-64.lock` 保留旧实验的 Windows/MKL 环境，仅供重现旧结果；它与默认 OpenBLAS 环境的耗时需分开报告。
 
-## 环境与数据
+需要数据集的 `raw` 目录，包含 `node-feat.csv.gz`、`node-label.csv.gz`、`node-year.csv.gz`（也支持 `node_year.csv.gz`）和 `edge.csv.gz`。
 
-本机 Miniforge 环境：`cpu-tuning-experiment`，Python 3.11。`environment.yml` 固定主要依赖，`conda-win-64.lock` 保存 Windows 精确包清单；`requirements.txt` 为训练依赖，`requirements-plot.txt` 追加绘图依赖。安装和下载必须先取得许可，项目本身不会执行自动安装或下载。
-
-数据参数指向包含 `raw` 的 arxiv 目录，或直接指向 `raw`。需要 `node-feat.csv.gz`、`node-label.csv.gz`、`node-year.csv.gz`（也支持下划线版本）及 `edge.csv.gz`。本机数据位于 `D:\作业\数据挖掘\codex_proc\cpu-tuning\data\extracted\arxiv`。
-
-所有过程产物放在挂载项目根目录的 `codex_proc`；每次运行或汇总输出使用新目录，避免覆盖。随机种子、数据哈希、划分、依赖和线程设置记录在对应运行的元数据中。
-
-## 统一运行入口
+下列 PowerShell 命令使用相对路径，分别指向数据集和最终结果目录，可按实际目录修改。每个 `--out` 必须是尚不存在的新目录。所有命令在项目目录运行：
 
 ```powershell
-$conda = 'D:\miniforge3\Scripts\conda.exe'
-$proc = 'D:\作业\数据挖掘\codex_proc\cpu-tuning'
+$data = './data/arxiv'
+$work = './results'
 $env:PYTHONDONTWRITEBYTECODE='1'
 $env:OMP_NUM_THREADS='1'; $env:MKL_NUM_THREADS='1'; $env:OPENBLAS_NUM_THREADS='1'
-$env:MPLCONFIGDIR="$proc\mpl-cache"
-& $conda run --no-capture-output -n cpu-tuning-experiment python -B run.py --help
+python -B run.py benchmark --data $data --out "$work/benchmark"
+python -B run.py baseline --data $data --out "$work/baseline-42" --seed 42
+python -B run.py mlp --data $data --run "$work/baseline-42" --cache "$work/features" --out "$work/mlp-42"
+python -B run.py graph-restarts --data $data --run "$work/baseline-42" --out "$work/graph-42"
 ```
 
-| 命令 | 用途 | 主要输入 |
-|---|---|---|
-| `baseline` | 运行分类、回归和图基线 | `--data`、`--out` |
-| `mlp` | 运行五组 MLP 消融 | `--run` 已完成基线目录、`--cache`、`--out` |
-| `graph-restarts` | 固定图上的多次 Louvain 初始化 | `--run`、`--out` |
-| `summarize-baseline` | 汇总基线及图结果 | `--runs`、`--out` |
-| `summarize-mlp` | 从保存预测重算指标并汇总 | `--runs`、`--out` |
-| `plot-mlp` | 生成消融、耗时和学习曲线图 | `--summary`、`--out` |
+`benchmark` 复现教师的分类及回归随机森林线程对照、MLP、Logistic Regression、HGBR、全量分类随机森林及教师口径的 Louvain。参数默认 50K 抽样、150 棵树；`--skip-full`、`--skip-graph`、`--samples`、`--graph-nodes` 和 `--trees` 可用于试跑。`--jobs` 仅指定随机森林的任务并行数；MLP、HGBR 与逻辑回归的数值库线程受上述环境变量控制。逻辑回归不再传入已弃用且在当前多分类设置中无并行收益的 `n_jobs=4`。`benchmark` 的 70/30 分层划分与教师脚本一致，调优流程还要从训练部分划出验证集。
 
-例如 `python -B run.py mlp --help` 查看某一阶段的完整参数。也支持 `python -B -m cpu_tuning --help`。
+完整实验及多种子汇总见 [基线说明](BASELINE_EXPERIMENT.md) 和 [MLP 说明](MLP_EXPERIMENT.md)。每个阶段以 `python -B run.py 命令 --help` 查看参数。另支持 `python -B -m cpu_tuning`；旧脚本作为兼容入口保留。
 
-下面从已有三个基线运行复现分类改进，并保存到一个新目录：
+## 代码结构与验证
 
-```powershell
-$session = "$proc\reproduce-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-$mlpRuns = @()
-foreach ($seed in @(42,123,2026)) {
-  $mlpOut = "$session\mlp-$seed"
-  & $conda run --no-capture-output -n cpu-tuning-experiment python -B run.py mlp --run "$proc\v2-full-50000-$seed" --cache "$proc\v3-graph-features" --out $mlpOut
-  if ($LASTEXITCODE -ne 0) { throw "MLP 实验失败：$seed" }
-  $mlpRuns += $mlpOut
-}
-& $conda run --no-capture-output -n cpu-tuning-experiment python -B run.py summarize-mlp --runs $mlpRuns --out "$session\summary"
-if ($LASTEXITCODE -ne 0) { throw '汇总失败' }
-& $conda run --no-capture-output -n cpu-tuning-experiment python -B run.py plot-mlp --summary "$session\summary" --out "$session\figures"
-```
+`cpu_tuning/benchmark.py` 负责教师基准计时，`baseline.py` 负责树模型调参和图任务，`mlp.py`、`features.py`、`protocol.py` 负责 MLP 与图特征，汇总器和绘图器独立运行。`io.py` 管理数据读取、哈希与实时记录。数据路径由命令行传入，后续流程按文件名及 SHA-256 验证数据；复制实验目录后可重新指定数据目录。
 
-首次运行需先按 [基线说明](BASELINE_EXPERIMENT.md) 生成对应的保存划分。正式规模为 50K 监督样本、30K 图节点；真实数据 seed=42 下的 10K 抽样因极少数类无法再分层，试跑可使用 20K 和较少树数。不同种子内的模型共用测试集，不同种子重新抽样和划分。
+基线运行记录包源码哈希，跨种子汇总拒绝混合源码版本及不同的硬件、系统和数值库线程环境。基线全部任务成功后才标记完成，并记录划分、图节点与原始结果的文件哈希；后续 MLP、图重启和基线汇总拒绝未完成或相关文件被改动的运行。旧基线缺少完成标记、文件哈希或源码哈希时需要重新运行；旧的基线和 MLP 结果若缺少计时环境信息，也需重新生成。不同版本的耗时不应直接合并。
 
-## 验证
+| 阶段 | 输入 | 主要输出 | 对应实验要求 |
+|---|---|---|---|
+| `benchmark` | 原始数据 | 教师模型的计时和质量记录 | 建立 CPU 基准 |
+| `baseline` | 原始数据 | 固定划分、树模型与社区结果 | 叶节点/深度调参、模型替换、类别加权 |
+| `mlp` | 已完成基线、原始数据 | 五组验证曲线、预测、逐类指标 | MLP 对照、过采样、图特征扩展 |
+| `graph-restarts` | 已完成基线、原始数据 | 同一图上的重启结果和总耗时 | 可选社区优化 |
+| `summarize-baseline` / `summarize-mlp` | 多种子运行目录 | 均值、标准差、配对差值 | 质量与耗时比较 |
+| `plot-mlp` | MLP 汇总目录 | PNG/SVG 图表 | 报告素材 |
 
-```powershell
-$env:CPU_TUNING_TEST_ROOT="$proc\tests"
-& $conda run --no-capture-output -n cpu-tuning-experiment python -B -m unittest discover -s tests -v
-```
+报告可围绕开头的三个改进角度组织，图特征和图重启是可选扩展，无须把每个扩展各算成一个主要角度。
 
-测试包含无向图去重与自环、孤立节点、二阶聚合、训练集采样边界、标准化范围、划分互斥、统一入口及旧入口兼容，还会用明确标记的合成数据运行“基线 → MLP 五组对照”的完整流程。合成数据只用于软件验证；产物保留在指定测试目录，不作为实验成绩。
+设置环境变量 `CPU_TUNING_TEST_ROOT` 为测试产物目录后，运行 `python -B -m unittest discover -s tests -v`，可执行小规模合成数据流程，包括汇总与绘图。合成结果仅验证程序，不是实验成绩。正式训练耗时受硬件、数值库和线程设置影响，应以本机实测为准。
 
-## 已有真实结果
-
-| 内容 | 本机目录（均在 `$proc` 下） |
-|---|---|
-| 三次基线原始记录 | `v2-full-50000-42`、`v2-full-50000-123`、`v2-full-50000-2026` |
-| 基线和图任务汇总 | `v2-aggregate-final` |
-| 三次 MLP 原始记录与预测 | `v3-mlp-42`、`v3-mlp-123`、`v3-mlp-2026` |
-| MLP 核验与汇总 | `v3-mlp-summary-final` |
-| MLP 图表 | `v3-mlp-figures-conda` |
-
-`results.jsonl` 保存原始记录，MLP 的 `test_predictions.npz` 可独立重算测试指标。`mean_sd.csv` 为均值及样本标准差（n=3），`paired_*` 为同种子内差值；`selected_by_validation.csv` 记录验证选择，不能用测试最优组替代该流程。新运行额外记录包内源代码哈希；已有记录仍保留原执行版本的哈希和源码快照。
-
-引用特征使用全图无标签特征和引用边，属于传导式设置；与纯特征输入的信息条件不同。沿用的随机分层测试集已在前序实验中查看，不能称为新的盲测或直接对比 OGB 时间划分榜单。更多局限见 MLP 说明。
-
-## 旧命令兼容
-
-`experiment.py`、`aggregate.py`、`graph_restarts.py`、`mlp_experiment.py`、`summarize_mlp.py`、`plot_mlp.py` 保留原参数接口，分别转发到上述六个命令的实现。新使用者从 `run.py` 开始即可。
+课程最终提交为 PDF 报告及代码原文件。报告应对照基准与所选 2～3 个改进角度，同时列出质量指标、训练/推理时间及额外调参成本；命名按“学号+姓名+数据挖掘第一次实验报告/代码”。本项目负责生成可供报告引用的实测记录。
