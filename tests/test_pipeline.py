@@ -332,6 +332,26 @@ class PipelineTests(unittest.TestCase):
             work / "baseline-summary",
         )
         self.assertTrue((work / "baseline-summary" / "mean_sd.csv").exists())
+        for key in ("python", "numpy", "networkx", "package_source_sha256"):
+            for missing in (False, True):
+                tag = key + ("-missing" if missing else "-different")
+                restart_copy = work / ("restarts-" + tag)
+                shutil.copytree(work / "restarts", restart_copy)
+                selection_path = restart_copy / "selection.json"
+                selection = json.loads(selection_path.read_text(encoding="utf-8"))
+                if missing:
+                    selection.pop(key)
+                else:
+                    selection[key] = {"different.py": "different"} if isinstance(selection[key], dict) else "different"
+                selection_path.write_text(json.dumps(selection), encoding="utf-8")
+                out = work / ("restart-summary-" + tag)
+                rejected = run(
+                    "summarize-baseline", "--runs", relocated_run, work / "baseline-2",
+                    "--graph-restarts", restart_copy, work / "restarts-2", "--out", out,
+                    success=False,
+                )
+                self.assertIn("graph restart " + key + " differs", rejected.stderr)
+                self.assertFalse(out.exists())
         for filename in ("per_seed.csv", "graph_restarts.csv", "provenance.json"):
             text = (work / "baseline-summary" / filename).read_text(
                 encoding="utf-8-sig"
@@ -396,6 +416,11 @@ class PipelineTests(unittest.TestCase):
         for filename in ("model_comparison_mean_sd.csv", "model_comparison_paired.csv", "pipeline_costs.csv", "audit.json"):
             self.assertTrue((work / "model-summary" / filename).is_file())
             self.assertNotIn(str(work), (work / "model-summary" / filename).read_text(encoding="utf-8-sig"))
+        audit = json.loads((work / "model-summary" / "audit.json").read_text(encoding="utf-8"))
+        for entry in audit["runs"]:
+            protocol = json.loads((work / entry["path"] / "protocol.json").read_text(encoding="utf-8"))
+            self.assertEqual(entry["source_split_sha256"], protocol["source_split_sha256"])
+            self.assertNotEqual(protocol["source_split_sha256"], protocol["split_sha256"])
         rejected = run(
             "summarize-mlp", "--data", relocated_data,
             "--runs", work / "mlp", work / "mlp-comparison-2",
@@ -464,6 +489,10 @@ class PipelineTests(unittest.TestCase):
             work / "summary",
         )
         self.assertTrue((work / "summary" / "audit.json").exists())
+        audit = json.loads((work / "summary" / "audit.json").read_text(encoding="utf-8"))
+        for entry in audit["runs"]:
+            protocol = json.loads((work / entry["path"] / "protocol.json").read_text(encoding="utf-8"))
+            self.assertEqual(entry["source_split_sha256"], protocol["source_split_sha256"])
         for filename in ("per_seed.csv", "audit.json"):
             self.assertNotIn(
                 str(work), (work / "summary" / filename).read_text(encoding="utf-8-sig")

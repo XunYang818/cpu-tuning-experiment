@@ -2,20 +2,54 @@
 
 import unittest
 import json
+import sys
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import networkx as nx
 
 from cpu_tuning.baseline import measures, supervised
-from cpu_tuning.io import read_edges, completed_run
+from cpu_tuning.io import read_edges, completed_run, sha256
+from cpu_tuning.graph_restarts import main as graph_restarts_main
 from cpu_tuning.protocol import ARMS, check_splits
 from cpu_tuning.mlp_summary import audit_class_rows
 from cpu_tuning.features import graph_cache
 
 
 class ReviewTests(unittest.TestCase):
+    def test_graph_restarts_reject_missing_or_different_runtime_and_source(self):
+        versions = {
+            "python": sys.version,
+            "numpy": np.__version__,
+            "networkx": nx.__version__,
+            "package_source_sha256": {
+                p.name: sha256(p)
+                for p in sorted((Path(__file__).resolve().parents[1] / "cpu_tuning").glob("*.py"))
+            },
+        }
+        for key in versions:
+            for missing in (False, True):
+                meta = deepcopy(versions)
+                if missing:
+                    meta.pop(key)
+                else:
+                    meta[key] = {"different.py": "different"} if isinstance(meta[key], dict) else "different"
+                with (
+                    self.subTest(key=key, missing=missing),
+                    patch.object(sys, "argv", [
+                        "graph-restarts", "--run", "run", "--data", "data", "--out", "out",
+                    ]),
+                    patch("cpu_tuning.graph_restarts.completed_run", return_value=(meta, [])),
+                    patch("cpu_tuning.graph_restarts.data_files") as data_files,
+                    patch.object(Path, "mkdir") as mkdir,
+                    self.assertRaisesRegex(ValueError, key + " differs from the main run"),
+                ):
+                    graph_restarts_main()
+                data_files.assert_not_called()
+                mkdir.assert_not_called()
+
     def test_cache_from_another_implementation_cannot_be_reused(self):
         meta = {"signature": {
             "features_sha256": "feature", "edges_sha256": "edge",

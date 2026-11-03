@@ -25,8 +25,17 @@ def main():
     if a.restarts < 2:
         p.error("restarts must be at least two")
     meta, rows = completed_run(a.run, ("graph_nodes.npy", "results.jsonl"))
-    if nx.__version__ != meta["networkx"]:
-        raise ValueError("networkx version differs from the main run")
+    versions = {
+        "python": sys.version,
+        "numpy": np.__version__,
+        "networkx": nx.__version__,
+        "package_source_sha256": {
+            p.name: sha256(p) for p in sorted(Path(__file__).parent.glob("*.py"))
+        },
+    }
+    for key, value in versions.items():
+        if meta.get(key) != value:
+            raise ValueError(f"{key} differs from the main run; rerun the baseline")
     if not same_host(meta.get("timing_environment", {}), timing_environment()):
         raise ValueError("host differs from the main run")
     threads = {
@@ -99,6 +108,7 @@ def main():
     best = max(trials, key=lambda t: t["modularity_at_1"])
     result = {
         "main_run": a.run.name,
+        **versions,
         "timing_environment": timing_environment(),
         "thread_environment": threads,
         "main_metadata_sha256": sha256(a.run / "metadata.json"),

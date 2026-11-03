@@ -379,6 +379,11 @@ def main():
     } if "graph" in tasks else {}
     for path in args.graph_restarts:
         result = json.loads((path / "selection.json").read_text(encoding="utf-8"))
+        for key in ("python", "numpy", "networkx", "package_source_sha256"):
+            if result.get(key) != signature[key]:
+                raise ValueError(
+                    f"graph restart {key} differs from main runs or is missing; rerun graph-restarts"
+                )
         if (not same_host(result.get("timing_environment", {}), signature["timing_environment"])
                 or result.get("thread_environment") != signature["thread_environment"]):
             raise ValueError("graph restart timing environment differs from main runs")

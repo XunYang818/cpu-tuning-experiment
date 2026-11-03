@@ -273,7 +273,7 @@ def main():
                 "seed": seed,
                 "path": path.name,
                 "cache": meta["graph_cache"],
-                "source_split_sha256": meta["split_sha256"],
+                "source_split_sha256": meta["source_split_sha256"],
                 "warnings": {r["name"]: r["warnings"] for r in results},
             }
         )

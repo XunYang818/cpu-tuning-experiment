@@ -23,6 +23,8 @@ python -B run.py graph-restarts --data $data --run "$work/tune-42" --out "$work/
 
 固定图重启在分辨率 1 上比较不同随机初始化，记录模块度和额外耗时。若要汇总图重启，三个种子都需各运行一次，再向 `summarize-baseline` 的 `--graph-restarts` 传入对应目录。图的模块度是内部指标，不证明外部社区真实性。
 
+图重启在运行前核对基线的 Python、NumPy、NetworkX 和包源码哈希，任一缺失或不一致时要求重跑基线。`selection.json` 保存这些版本信息，汇总时再次核对；旧图重启结果缺少这些字段时需重新运行，不能混入新版耗时比较。
+
 可用 `tune --tasks classification`、`--tasks regression`、`--tasks graph` 或它们的组合只运行指定任务。`summarize-baseline` 支持这些运行，但同次汇总的任务集合必须一致；表格和图只包含所选任务，没有分类时不生成逐类召回率表。`--graph-restarts` 只适用于包含图任务的运行。
 
 ## 输出和可比性
