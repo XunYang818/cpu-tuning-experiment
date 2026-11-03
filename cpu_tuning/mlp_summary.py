@@ -65,6 +65,10 @@ def main():
     p.add_argument("--runs", nargs="+", required=True, type=Path)
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--data", required=True, type=Path)
+    p.add_argument(
+        "--tuning-runs", nargs="+", type=Path,
+        help="Completed tune runs for a matched tree/MLP classification comparison",
+    )
     args = p.parse_args()
     if len(args.runs) < 2:
         p.error("at least two runs required")
@@ -77,6 +81,7 @@ def main():
     class_rows = []
     curves = []
     protocols = []
+    mlp_runs = []
     raw_y = None
     for path in args.runs:
         meta = json.loads((path / "protocol.json").read_text(encoding="utf-8"))
@@ -194,6 +199,11 @@ def main():
                 per_class, pred, raw_y, train, labels, rare, meta["ros_floor"]
             )
         selection_record = next(r for r in records if r["stage"] == "selection")
+        if selection_record["selected"] != best["name"]:
+            raise ValueError("selection record differs from validation selection")
+        mlp_runs.append(dict(
+            path=path, meta=meta, validation=val, test=results, selection=selection_record
+        ))
         by_name = {r["name"]: r for r in results}
         for r in results:
             metrics = dict(
@@ -295,7 +305,18 @@ def main():
         )
         for (c, m), v in sorted(pair_groups.items())
     ]
+    comparison = None
+    if args.tuning_runs:
+        from .comparison import build_comparison
+
+        comparison = build_comparison(args.tuning_runs, mlp_runs)
     args.out.mkdir(parents=True, exist_ok=False)
+    if comparison is not None:
+        for filename, rows in zip(
+            ("model_comparison.csv", "model_comparison_mean_sd.csv",
+             "model_comparison_paired.csv", "pipeline_costs.csv"), comparison[:4]
+        ):
+            write_csv(args.out / filename, rows)
     for filename, rows in [
         ("per_seed.csv", detailed),
         ("mean_sd.csv", means),
@@ -340,6 +361,13 @@ def main():
             "per_class_metrics_verified": True,
             "runs": protocols,
             "shared_protocol": reference,
+            "model_comparison": comparison[4] if comparison is not None else [],
+            "cost_notes": [
+                "Model search_seconds includes per-arm MLP validation or the complete RF parameter search; fixed tree controls have no search.",
+                "pipeline_costs reports the shared five-arm MLP search separately; do not add it to per-arm search times.",
+                "Graph compute/save costs describe a shared cache build, not a new build for every seed; cache_access may include that build.",
+                "Final fit/predict exclude preprocessing. Graph MLP arms use additional transductive information.",
+            ],
             "note": "Sample SD uses n-1; test splits previously seen in tree experiments; graph feature arms are transductive.",
         },
     )

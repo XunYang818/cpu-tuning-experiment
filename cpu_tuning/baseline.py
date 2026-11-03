@@ -1,4 +1,4 @@
-"""Reproducible CPU experiment; outputs are real measurements only."""
+"""Tune CPU tree models and Louvain parameters, including baseline controls."""
 
 import argparse
 import csv

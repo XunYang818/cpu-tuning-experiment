@@ -34,6 +34,7 @@ def prepare(X, hops, y, tr, ev, order, ros, args):
 
 
 def validate_arm(out, name, order, ros, X, hops, y, tr, val, args, labels):
+    started = time.perf_counter()
     A, yt, B, rare, fit_ids, prep_time = prepare(X, hops, y, tr, val, order, ros, args)
     model = MLPClassifier(random_state=args.seed, **MLP_PARAMS)
     best_key = (-1.0, -1.0)
@@ -89,6 +90,7 @@ def validate_arm(out, name, order, ros, X, hops, y, tr, val, args, labels):
         "prep_seconds": prep_time,
         "fit_seconds": train_seconds,
         "predict_seconds": predict_seconds,
+        "search_seconds": time.perf_counter() - started,
         "n_train_original": len(tr),
         "n_train_fit": len(fit_ids),
         "rare10_labels": rare.tolist(),

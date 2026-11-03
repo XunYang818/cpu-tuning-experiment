@@ -1,5 +1,6 @@
 """Command dispatch and compatibility checks, without running model training."""
 
+import os
 import subprocess
 import sys
 import unittest
@@ -8,12 +9,14 @@ from pathlib import Path
 from cpu_tuning.cli import COMMANDS
 
 ROOT = Path(__file__).resolve().parents[1]
+CHILD_ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
 
 
 class CommandTests(unittest.TestCase):
     def test_every_command_exposes_its_own_options(self):
         expected = {
             "benchmark": "--data",
+            "tune": "--data",
             "baseline": "--data",
             "summarize-baseline": "--runs",
             "graph-restarts": "--restarts",
@@ -27,6 +30,8 @@ class CommandTests(unittest.TestCase):
                     [sys.executable, "-B", str(ROOT / "run.py"), command, "--help"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    env=CHILD_ENV,
                     cwd=ROOT,
                     check=True,
                 )
@@ -46,6 +51,8 @@ class CommandTests(unittest.TestCase):
                     [sys.executable, "-B", str(ROOT / filename), "--help"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    env=CHILD_ENV,
                     cwd=ROOT,
                     check=True,
                 )
@@ -56,6 +63,8 @@ class CommandTests(unittest.TestCase):
             [sys.executable, "-B", str(ROOT / "run.py"), "missing-command"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            env=CHILD_ENV,
             cwd=ROOT,
         )
         self.assertNotEqual(result.returncode, 0)

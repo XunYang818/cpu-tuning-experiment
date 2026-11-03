@@ -31,18 +31,35 @@ MLP 的隐藏层配置相同，但增加输入维度也增加了第一层参数�
 
 ## 复现
 
-准备及 `$data`、`$work` 的含义见 README。先为各种子运行 `baseline`，再运行：
+准备及 `$data`、`$work` 的含义见 README。先为各种子运行 `tune`，再运行：
 
 ```powershell
 foreach ($seed in @(42,123,2026)) {
-  python -B run.py mlp --data $data --run "$work/baseline-$seed" --cache "$work/features" --out "$work/mlp-$seed"
+  python -B run.py mlp --data $data --run "$work/tune-$seed" --cache "$work/features" --out "$work/mlp-$seed"
   if ($LASTEXITCODE -ne 0) { throw "MLP 失败：$seed" }
 }
-python -B run.py summarize-mlp --data $data --runs "$work/mlp-42" "$work/mlp-123" "$work/mlp-2026" --out "$work/mlp-summary"
+$mlpRuns = @(42,123,2026) | ForEach-Object { "$work/mlp-$_" }
+$tuningRuns = @(42,123,2026) | ForEach-Object { "$work/tune-$_" }
+python -B run.py summarize-mlp --data $data --runs $mlpRuns --tuning-runs $tuningRuns --out "$work/mlp-summary"
 python -B run.py plot-mlp --summary "$work/mlp-summary" --out "$work/mlp-figures"
 ```
 
 共享缓存先由一个进程构建完成，不支持多进程同时构建。缓存签名同时包含生成源码哈希；源码或数据改变时应指定新的缓存目录。MLP 要求输入基线已完成且保存划分未变。汇总从保存预测重算总体与逐类指标，并核对训练/过采样数量、稀有类标记、数据哈希、划分和计时环境；重新指定数据位置后仍可使用复制的结果目录。旧版结果可能不包含新版完成标记、自包含划分哈希或计时环境，需要重新运行。输出逐种子指标、均值、样本标准差、配对差值和学习曲线；三次重复不足以支持夸大的统计结论。
+
+## 树模型与 MLP 统一对照
+
+`--tuning-runs` 传入包含分类任务的已完成 `tune` 结果；省略时保留原有的五组 MLP 汇总。两组运行目录可以按任意顺序传入，程序按种子配对，要求种子集合完全相同，并检查原始数据、源划分哈希、实际训练/验证/测试 ID、源码版本、Python/依赖版本、硬件和数值库线程环境。任一不一致都拒绝生成统一表。
+
+统一输出包括：
+
+- `model_comparison.csv`：逐种子的四个树模型与五组 MLP，列出 accuracy、macro/weighted F1、最终训练/推理时间、搜索时间，并标记验证选出的 MLP。图特征组标为 `transductive`。
+- `model_comparison_mean_sd.csv`：各模型质量与耗时的均值及样本标准差。
+- `model_comparison_paired.csv`：同一种子内各模型相对 `rf_baseline` 的差值，再计算跨种子的均值和样本标准差；质量指标正差值表示提高，耗时正差值表示更慢。
+- `pipeline_costs.csv`：五组 MLP 共同选型的总搜索时间，以及共享图缓存的构造、保存和本次访问时间。`audit.json` 记录配对来源与成本口径。
+
+表中的 `search_seconds` 对 MLP 是该组独立验证选轮数的墙钟时间（含预处理、验证预测、指标计算和曲线写入），对 `rf_tuned` 是全部随机森林候选的搜索时间；其余预先声明的树对照为 0。五组共同选型应报告 `pipeline_costs.csv` 的总搜索成本，不能再与逐组搜索时间相加。图构造与保存属于共享缓存的一次性成本，跨种子复用时不能重复累加；首次缓存访问可能已包含构造和保存。最终标准化等预处理仍在原 MLP 汇总的 `prep_seconds` 中单列，未计入 `fit_seconds`。
+
+统一表使用调优阶段的 `rf_baseline` 作对照，与 MLP 共享保存的测试集；教师 `benchmark` 中的 MLP 使用另一套早停协议，不混入该表。图特征组获得额外的全图无标签信息，报告时保留其传导式设置说明。旧 MLP 结果若未记录逐组搜索时间，需重新运行后才能生成统一对照表。
 
 ## 耗时与溯源
 

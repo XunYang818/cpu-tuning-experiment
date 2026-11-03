@@ -6,7 +6,8 @@ import sys
 
 COMMANDS = {
     "benchmark": ("benchmark", "Run the teacher's CPU timing comparisons"),
-    "baseline": ("baseline", "Run classification, regression and Louvain baselines"),
+    "tune": ("baseline", "Tune tree models and compare Louvain parameters"),
+    "baseline": ("baseline", "Compatibility alias for tune"),
     "summarize-baseline": ("baseline_summary", "Summarize complete baseline runs"),
     "graph-restarts": (
         "graph_restarts",

@@ -2,7 +2,7 @@
 
 以 arXiv 论文数据为例，在 CPU 上比较分类、年份回归和 Louvain 社区发现。对应调优课件的三个改进角度：参数调优（随机森林叶节点与深度）、模型替换（决策树、MLP、HGBR、Extra Trees）、长尾处理与评价（类别加权、过采样、macro-F1 与逐类召回）。引用邻居特征作为 MLP 的扩展消融。
 
-按以下顺序运行：教师基准计时 → 训练/验证/测试划分与树模型调优 → 复用划分运行 MLP 对照 → 多种子汇总与绘图。随机森林参数、MLP 轮数和 MLP 主方案在验证集上选择；其余模型作为预先声明的对照。最终测试只用于评价。
+按以下顺序运行：`benchmark` 教师基准计时 → `tune` 划分数据并调优树模型与社区参数 → `mlp` 复用划分运行 MLP 对照 → 多种子汇总与绘图。随机森林参数、MLP 轮数和 MLP 主方案在验证集上选择；其余模型作为预先声明的对照。最终测试只用于评价。
 
 ## 准备
 
@@ -18,14 +18,14 @@ $work = './results'
 $env:PYTHONDONTWRITEBYTECODE='1'
 $env:OMP_NUM_THREADS='1'; $env:MKL_NUM_THREADS='1'; $env:OPENBLAS_NUM_THREADS='1'
 python -B run.py benchmark --data $data --out "$work/benchmark"
-python -B run.py baseline --data $data --out "$work/baseline-42" --seed 42
-python -B run.py mlp --data $data --run "$work/baseline-42" --cache "$work/features" --out "$work/mlp-42"
-python -B run.py graph-restarts --data $data --run "$work/baseline-42" --out "$work/graph-42"
+python -B run.py tune --data $data --out "$work/tune-42" --seed 42
+python -B run.py mlp --data $data --run "$work/tune-42" --cache "$work/features" --out "$work/mlp-42"
+python -B run.py graph-restarts --data $data --run "$work/tune-42" --out "$work/graph-42"
 ```
 
 `benchmark` 复现教师的分类及回归随机森林线程对照、MLP、Logistic Regression、HGBR、全量分类随机森林及教师口径的 Louvain。参数默认 50K 抽样、150 棵树；`--skip-full`、`--skip-graph`、`--samples`、`--graph-nodes` 和 `--trees` 可用于试跑。`--jobs` 仅指定随机森林的任务并行数；MLP、HGBR 与逻辑回归的数值库线程受上述环境变量控制。逻辑回归不再传入已弃用且在当前多分类设置中无并行收益的 `n_jobs=4`。`benchmark` 的 70/30 分层划分与教师脚本一致，调优流程还要从训练部分划出验证集。
 
-完整实验及多种子汇总见 [基线说明](BASELINE_EXPERIMENT.md) 和 [MLP 说明](MLP_EXPERIMENT.md)。每个阶段以 `python -B run.py 命令 --help` 查看参数。另支持 `python -B -m cpu_tuning`；旧脚本作为兼容入口保留。
+完整实验及多种子汇总见 [调优说明](BASELINE_EXPERIMENT.md) 和 [MLP 说明](MLP_EXPERIMENT.md)。每个阶段以 `python -B run.py 命令 --help` 查看参数。`baseline` 是 `tune` 的兼容别名；旧命令和已有结果目录仍可使用。另支持 `python -B -m cpu_tuning`；旧脚本作为兼容入口保留。结果中的 `rf_baseline` 表示原始参数对照，`rf_tuned` 表示按验证集选出的参数。
 
 ## 代码结构与验证
 
@@ -36,14 +36,16 @@ python -B run.py graph-restarts --data $data --run "$work/baseline-42" --out "$w
 | 阶段 | 输入 | 主要输出 | 对应实验要求 |
 |---|---|---|---|
 | `benchmark` | 原始数据 | 教师模型的计时和质量记录 | 建立 CPU 基准 |
-| `baseline` | 原始数据 | 固定划分、树模型与社区结果 | 叶节点/深度调参、模型替换、类别加权 |
+| `tune` | 原始数据 | 固定划分、树模型与社区结果 | 叶节点/深度调参、模型替换、类别加权 |
 | `mlp` | 已完成基线、原始数据 | 五组验证曲线、预测、逐类指标 | MLP 对照、过采样、图特征扩展 |
 | `graph-restarts` | 已完成基线、原始数据 | 同一图上的重启结果和总耗时 | 可选社区优化 |
-| `summarize-baseline` / `summarize-mlp` | 多种子运行目录 | 均值、标准差、配对差值 | 质量与耗时比较 |
+| `summarize-baseline` / `summarize-mlp` | 多种子运行目录 | 均值、标准差、配对差值；MLP 汇总可合并树模型对照 | 质量与耗时比较 |
 | `plot-mlp` | MLP 汇总目录 | PNG/SVG 图表 | 报告素材 |
 
 报告可围绕开头的三个改进角度组织，图特征和图重启是可选扩展，无须把每个扩展各算成一个主要角度。
 
-设置环境变量 `CPU_TUNING_TEST_ROOT` 为测试产物目录后，运行 `python -B -m unittest discover -s tests -v`，可执行小规模合成数据流程，包括汇总与绘图。合成结果仅验证程序，不是实验成绩。正式训练耗时受硬件、数值库和线程设置影响，应以本机实测为准。
+向 `summarize-mlp` 同时传入 `--runs` 和 `--tuning-runs`，可生成树模型与五组 MLP 的统一分类对照表，以及均值、标准差和相对 `rf_baseline` 的配对差值。汇总先核对种子、数据、保存划分、源码版本和计时环境，再合并质量指标、训练/推理时间及搜索成本。具体命令与输出解释见 MLP 说明。
+
+设置环境变量 `CPU_TUNING_TEST_ROOT` 为测试产物目录后，运行 `python -B -m unittest discover -s tests -v`，可执行小规模合成数据流程，包括汇总与绘图。测试内部统一子进程输出为 UTF-8，支持 Windows 中文路径，无需先修改终端编码。合成结果仅验证程序，不是实验成绩。正式训练耗时受硬件、数值库和线程设置影响，应以本机实测为准。
 
 课程最终提交为 PDF 报告及代码原文件。报告应对照基准与所选 2～3 个改进角度，同时列出质量指标、训练/推理时间及额外调参成本；命名按“学号+姓名+数据挖掘第一次实验报告/代码”。本项目负责生成可供报告引用的实测记录。

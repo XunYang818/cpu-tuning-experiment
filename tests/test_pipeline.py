@@ -43,6 +43,7 @@ class PipelineTests(unittest.TestCase):
         env = dict(
             os.environ, PYTHONDONTWRITEBYTECODE="1", OMP_NUM_THREADS="1",
             MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
+            PYTHONIOENCODING="utf-8",
         )
 
         def run(command, *args, success=True):
@@ -64,7 +65,7 @@ class PipelineTests(unittest.TestCase):
                     paths = [work / f"{tag}-{seed}" for seed in (42, 43)]
                     for seed, path in zip((42, 43), paths):
                         run(
-                            "baseline", "--data", raw, "--out", path,
+                            "tune", "--data", raw, "--out", path,
                             "--tasks", *selected, "--seed", seed, "--samples", size,
                             "--graph-nodes", size, "--trees", 1, "--jobs", 1,
                         )
@@ -93,7 +94,7 @@ class PipelineTests(unittest.TestCase):
         artifact_root = Path(os.environ["CPU_TUNING_TEST_ROOT"])
         artifact_root.mkdir(parents=True, exist_ok=True)
         # mkdtemp creates a unique directory; no automatic deletion is performed.
-        work = Path(tempfile.mkdtemp(prefix="pipeline-", dir=artifact_root))
+        work = Path(tempfile.mkdtemp(prefix="pipeline-中文-", dir=artifact_root))
         raw = work / "data" / "raw"
         raw.mkdir(parents=True)
         rng = np.random.RandomState(19)
@@ -119,13 +120,14 @@ class PipelineTests(unittest.TestCase):
         env = dict(
             os.environ,
             PYTHONDONTWRITEBYTECODE="1",
+            PYTHONIOENCODING="utf-8",
             OMP_NUM_THREADS="1",
             MKL_NUM_THREADS="1",
             OPENBLAS_NUM_THREADS="1",
             MPLCONFIGDIR=str(work / "matplotlib-cache"),
         )
 
-        def run(command, *args):
+        def run(command, *args, success=True):
             result = subprocess.run(
                 [sys.executable, "-B", str(ROOT / "run.py"), command, *map(str, args)],
                 cwd=ROOT,
@@ -138,7 +140,11 @@ class PipelineTests(unittest.TestCase):
             (work / (command + ".log")).write_text(
                 result.stdout + result.stderr, encoding="utf-8"
             )
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            if success:
+                self.assertEqual(result.returncode, 0, msg=result.stderr)
+            else:
+                self.assertNotEqual(result.returncode, 0)
+            return result
 
         # A graph-only run must not attempt classification stratification.
         run(
@@ -358,6 +364,45 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertNotEqual(mismatch.returncode, 0)
         self.assertIn("incompatible", mismatch.stderr)
+        # Match by seed, not argument order, and compare all nine classifiers.
+        run(
+            "mlp", "--data", relocated_data, "--run", work / "baseline-2",
+            "--cache", work / "cache", "--out", work / "mlp-comparison-2",
+            "--max-epochs", 2, "--patience", 1, "--ros-floor", 50,
+        )
+        comparison_args = (
+            "--data", relocated_data, "--runs", work / "mlp", work / "mlp-comparison-2",
+            "--tuning-runs", work / "baseline-2", relocated_run,
+        )
+        run("summarize-mlp", *comparison_args, "--out", work / "model-summary")
+        with (work / "model-summary" / "model_comparison.csv").open(
+            encoding="utf-8-sig", newline=""
+        ) as f:
+            comparison = list(csv.DictReader(f))
+        self.assertEqual(len(comparison), 18)
+        self.assertEqual(sum(row["selected_mlp"] == "True" for row in comparison), 2)
+        self.assertEqual({row["seed"] for row in comparison}, {"42", "43"})
+        for row in comparison:
+            self.assertEqual(int(row["n_test"]), 54)
+            self.assertGreaterEqual(float(row["search_seconds"]), 0)
+            if row["name"].startswith("mlp_hop"):
+                self.assertEqual(row["setting"], "transductive")
+        tree_baseline = next(row for row in comparison if row["name"] == "rf_baseline" and row["seed"] == "42")
+        tree_result = next(
+            json.loads(line) for line in (relocated_run / "results.jsonl").read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("name") == "rf_baseline" and json.loads(line)["task"] == "classification"
+        )
+        self.assertEqual(float(tree_baseline["macro_f1"]), tree_result["metrics"]["macro_f1"])
+        for filename in ("model_comparison_mean_sd.csv", "model_comparison_paired.csv", "pipeline_costs.csv", "audit.json"):
+            self.assertTrue((work / "model-summary" / filename).is_file())
+            self.assertNotIn(str(work), (work / "model-summary" / filename).read_text(encoding="utf-8-sig"))
+        rejected = run(
+            "summarize-mlp", "--data", relocated_data,
+            "--runs", work / "mlp", work / "mlp-comparison-2",
+            "--tuning-runs", relocated_run, "--out", work / "missing-seed-summary", success=False,
+        )
+        self.assertIn("same seeds", rejected.stderr)
+        self.assertFalse((work / "missing-seed-summary").exists())
         split_path = work / "baseline-2" / "split_indices.npz"
         with np.load(split_path) as split:
             sampled = split["sampled"].copy()
